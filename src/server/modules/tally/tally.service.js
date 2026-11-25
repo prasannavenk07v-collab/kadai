@@ -2,7 +2,7 @@ import { getClient, query } from '../../db/index.js';
 import { httpError } from '../../lib/auth.js';
 import { tallyConfig } from './tally.config.js';
 import { dateOnlyFromDb, istPeriodRange, voucherDateFrom } from './tally.ist.js';
-import { ledgerDefaults, resolveVoucher } from './tally.mapping.js';
+import { isSuspenseLedger, ledgerDefaults, resolveVoucher } from './tally.mapping.js';
 import { remoteIdFor, renderBatch } from './tally.xml.js';
 
 // Batch lifecycle: draft -> confirmed -> pushed | pushed_with_conflicts,
@@ -479,6 +479,17 @@ export async function overrideLine(batchId, lineId, changes, _actor) {
     throw httpError(400, 'NO_CHANGES', `Provide at least one of: ${OVERRIDABLE.join(', ')}.`);
   }
 
+  // A single sales-ledger override would post every slab group to one ledger.
+  // On a mixed 5%/18% invoice that is a silent miscategorisation, so require
+  // the line to be single-slab; mixed lines stay Suspense until the invoice or
+  // the batch is resolved deliberately.
+  const groups = Array.isArray(line.sales_breakdown) ? line.sales_breakdown : [];
+  if (changes.sales_ledger_name !== undefined && groups.length > 1) {
+    throw httpError(400, 'SALES_LEDGER_PER_SLAB',
+      'This invoice has more than one GST slab, so one sales ledger cannot cover it. '
+      + 'Map the slab default in Ledger mapping, then void and regenerate the batch.');
+  }
+
   const next = {
     sales_ledger_name: changes.sales_ledger_name ?? line.sales_ledger_name,
     party_ledger_name: changes.party_ledger_name ?? line.party_ledger_name,
@@ -487,14 +498,13 @@ export async function overrideLine(batchId, lineId, changes, _actor) {
     igst_ledger_name: changes.igst_ledger_name ?? line.igst_ledger_name,
   };
 
-  // A single sales ledger override applies to every slab group on the line.
-  const breakdown = (line.sales_breakdown || []).map((group) => ({
+  const breakdown = groups.map((group) => ({
     ...group,
     ledger_name: changes.sales_ledger_name ? String(changes.sales_ledger_name).trim() : group.ledger_name,
   }));
 
   const stillSuspense = [next.sales_ledger_name, next.party_ledger_name, next.cgst_ledger_name,
-    next.sgst_ledger_name, next.igst_ledger_name].some((name) => !name || name === 'Suspense');
+    next.sgst_ledger_name, next.igst_ledger_name].some(isSuspenseLedger);
 
   updates.push(`status = $${params.length + 1}`);
   params.push(stillSuspense ? 'suspense' : 'mapped');

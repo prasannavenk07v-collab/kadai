@@ -12,6 +12,10 @@ export const SESSION_COOKIE = 'kadai_session';
 
 const DEFAULT_TTL_SECONDS = 8 * 60 * 60;
 const VALID_ROLES = new Set(['owner', 'staff', 'accountant']);
+// How the session was authenticated. 'pin' is the shared deployment secret and
+// is deliberately weaker than a per-person credential, so statutory actions
+// can require 'session' and refuse a pin-minted token.
+const AUTH_MODES = new Set(['pin', 'session']);
 
 export function httpError(statusCode, code, message) {
   const err = new Error(message);
@@ -40,7 +44,7 @@ export function authConfigured() {
  * Create a signed session token for a staff member.
  * Callers must only pass a role that was read from the staff table.
  */
-export function signSession({ staffId, role, name = null }, options = {}) {
+export function signSession({ staffId, role, name = null, mode = 'pin' }, options = {}) {
   const secret = options.secret ?? sessionSecret();
   if (!secret) {
     throw httpError(503, 'AUTH_NOT_CONFIGURED', 'SESSION_SECRET is not configured.');
@@ -48,12 +52,16 @@ export function signSession({ staffId, role, name = null }, options = {}) {
   if (!VALID_ROLES.has(role)) {
     throw httpError(500, 'INVALID_ROLE', `Cannot sign a session for role "${role}".`);
   }
+  if (!AUTH_MODES.has(mode)) {
+    throw httpError(500, 'INVALID_AUTH_MODE', `Cannot sign a session with mode "${mode}".`);
+  }
   const now = options.now ?? Date.now();
   const ttlSeconds = options.ttlSeconds ?? DEFAULT_TTL_SECONDS;
   const payload = {
     sub: String(staffId),
     role,
     name,
+    mode,
     iat: Math.floor(now / 1000),
     exp: Math.floor(now / 1000) + ttlSeconds,
   };
@@ -91,7 +99,11 @@ export function verifySession(token, options = {}) {
   if (!payload || typeof payload.exp !== 'number' || payload.exp <= now) return null;
   if (!VALID_ROLES.has(payload.role) || !payload.sub) return null;
 
-  return { staffId: payload.sub, role: payload.role, name: payload.name ?? null };
+  // A token with no mode (or an unknown one) is treated as the weakest mode,
+  // so an older token cannot accidentally satisfy a statutory guard.
+  const mode = AUTH_MODES.has(payload.mode) ? payload.mode : 'pin';
+
+  return { staffId: payload.sub, role: payload.role, name: payload.name ?? null, mode };
 }
 
 function readCookie(header, name) {
@@ -138,5 +150,31 @@ export function requireRole(...roles) {
       throw httpError(403, 'FORBIDDEN', `Only ${roles.join(' or ')} may do that.`);
     }
     request.actor = actor;
+  };
+}
+
+/**
+ * Only a real per-person session may do this. The shared deployment PIN fails
+ * closed here even though it can hold the same role claim — otherwise the
+ * accountant could re-login as the owner with the same PIN and confirm a push
+ * (docs/m3-books-plan.md §3, §9, decision D7).
+ *
+ * AUTH_ALLOW_PIN_WRITES exists for a rehearsal shop. It is ignored in
+ * production, so the flag cannot become a production bypass.
+ */
+export function allowPinWrites() {
+  if (process.env.NODE_ENV === 'production') return false;
+  return String(process.env.AUTH_ALLOW_PIN_WRITES || '').toLowerCase() === 'true';
+}
+
+export function requireAttributableRole(...roles) {
+  const guard = requireRole(...roles);
+  return async function attributableGuard(request) {
+    await guard(request);
+    if (request.actor.mode === 'pin' && !allowPinWrites()) {
+      throw httpError(403, 'AUTH_NOT_ATTRIBUTABLE',
+        'This action needs a per-person sign-in, not the shared PIN. '
+        + 'Set AUTH_ALLOW_PIN_WRITES=true only for a rehearsal shop.');
+    }
   };
 }

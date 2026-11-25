@@ -5,11 +5,21 @@ process.env.NODE_ENV = 'test';
 process.env.SESSION_SECRET = 'test-secret-that-is-long-enough';
 process.env.TALLY_ENABLED = 'false';
 
-const { signSession, verifySession } = await import('../../lib/auth.js');
+const {
+  allowPinWrites,
+  requireAttributableRole,
+  signSession,
+  verifySession,
+} = await import('../../lib/auth.js');
 const fastify = (await import('../../index.js')).default;
 
+// Default mode is 'pin': the weakest mode, least privilege by default.
 function tokenFor(role = 'owner') {
   return signSession({ staffId: 1, role, name: `${role} test` });
+}
+
+function sessionTokenFor(role = 'owner') {
+  return signSession({ staffId: 1, role, name: `${role} test`, mode: 'session' });
 }
 
 function bearer(token) {
@@ -21,6 +31,26 @@ test('session: a signed token round-trips and carries the actor', () => {
   const actor = verifySession(token);
   assert.equal(actor.staffId, '1');
   assert.equal(actor.role, 'owner');
+  assert.equal(actor.mode, 'pin', 'an unqualified session must not look attributable');
+  assert.equal(verifySession(sessionTokenFor('owner')).mode, 'session');
+});
+
+test('session: no mode (legacy token) is treated as the weakest mode', async () => {
+  const { createHmac } = await import('node:crypto');
+  const payload = Buffer.from(JSON.stringify({
+    sub: '1', role: 'owner', iat: Math.floor(Date.now() / 1000),
+    exp: Math.floor(Date.now() / 1000) + 60,
+  })).toString('base64url');
+  const signature = createHmac('sha256', process.env.SESSION_SECRET).update(payload).digest('base64url');
+  const actor = verifySession(`${payload}.${signature}`);
+  assert.equal(actor.mode, 'pin');
+});
+
+test('session: an unknown mode cannot be signed', () => {
+  assert.throws(
+    () => signSession({ staffId: 1, role: 'owner', mode: 'sso' }),
+    (err) => err.code === 'INVALID_AUTH_MODE'
+  );
 });
 
 test('session: tampered, expired and foreign-secret tokens are rejected', () => {
@@ -82,6 +112,75 @@ test('routes: an owner passes the guard', async () => {
   const body = JSON.parse(response.body);
   assert.equal(body.tally.enabled, false);
   assert.ok(body.tally.default_period.period_start);
+});
+
+test('guard: a shared-PIN owner cannot confirm or push, a real session can', async () => {
+  const guard = requireAttributableRole('owner');
+
+  await assert.rejects(
+    () => guard({ headers: bearer(tokenFor('owner')), actor: null }),
+    (err) => err.code === 'AUTH_NOT_ATTRIBUTABLE' && err.statusCode === 403,
+    'the accountant could otherwise re-login as the owner with the same shared PIN'
+  );
+
+  const request = { headers: bearer(sessionTokenFor('owner')) };
+  await guard(request);
+  assert.equal(request.actor.mode, 'session');
+});
+
+test('guard: the PIN-write escape hatch is ignored in production', () => {
+  process.env.AUTH_ALLOW_PIN_WRITES = 'true';
+  process.env.NODE_ENV = 'production';
+  assert.equal(allowPinWrites(), false);
+  process.env.NODE_ENV = 'test';
+  assert.equal(allowPinWrites(), true);
+  delete process.env.AUTH_ALLOW_PIN_WRITES;
+});
+
+test('push policy: only a confirmed batch may be pushed', async () => {
+  const { assertPushableStatus, RECONCILE_OUTCOMES } = await import('./tally.push.service.js');
+
+  assert.doesNotThrow(() => assertPushableStatus('confirmed'));
+
+  // The important one: after an ambiguous timeout the batch is 'failed', and a
+  // retry must be refused rather than re-POSTing the same vouchers.
+  assert.throws(() => assertPushableStatus('failed'),
+    (err) => err.code === 'PUSH_NEEDS_RECONCILIATION');
+  assert.throws(() => assertPushableStatus('pushed'),
+    (err) => err.code === 'ALREADY_PUSHED');
+  assert.throws(() => assertPushableStatus('pushed_with_conflicts'),
+    (err) => err.code === 'ALREADY_PUSHED');
+  assert.throws(() => assertPushableStatus('draft'),
+    (err) => err.code === 'INVALID_STATE');
+
+  assert.equal(RECONCILE_OUTCOMES.nothing_received, 'confirmed');
+  assert.equal(RECONCILE_OUTCOMES.pushed, 'pushed');
+});
+
+test('sign-in: repeated wrong PINs are throttled', async () => {
+  process.env.AUTH_PIN = 'test-pin-1234';
+  const staffId = 4242;
+
+  try {
+    for (let attempt = 0; attempt < 5; attempt += 1) {
+      const response = await fastify.inject({
+        method: 'POST',
+        url: '/api/auth/session',
+        payload: { staff_id: staffId, pin: 'wrong' },
+      });
+      assert.equal(response.statusCode, 401);
+    }
+
+    const blocked = await fastify.inject({
+      method: 'POST',
+      url: '/api/auth/session',
+      payload: { staff_id: staffId, pin: 'test-pin-1234' },
+    });
+    assert.equal(blocked.statusCode, 429);
+    assert.equal(JSON.parse(blocked.body).code, 'AUTH_RATE_LIMITED');
+  } finally {
+    delete process.env.AUTH_PIN;
+  }
 });
 
 test('routes: sign-in is closed until AUTH_PIN is configured', async () => {

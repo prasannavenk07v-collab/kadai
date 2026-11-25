@@ -34,8 +34,21 @@ writes a log row: file, timestamp, row count, result. Logs are append-only.
 | `TALLY_TIMEOUT_MS` | Push timeout; a timeout is ambiguous, never auto-retried | `10000` |
 | `SESSION_SECRET` | Signing key for role-bearing sessions (≥ 16 chars) | closed |
 | `AUTH_PIN` | Interim shared sign-in pin; dev/ops only, not the M3 gate | closed |
+| `AUTH_ALLOW_PIN_WRITES` | Let a shared-PIN session confirm/void/push (rehearsal only; ignored when `NODE_ENV=production`) | `false` |
 
 With `TALLY_ENABLED=false` every route still works and the XML is downloadable.
+
+A session records **how** it was authenticated. A token minted by the shared `AUTH_PIN` carries
+the staff member's role but is refused on confirm, void, push and reconcile, because the
+accountant could otherwise sign in as the owner with the same PIN. That refusal is the
+attribution gate in the plan (§3, §9, decision D7); per-person credentials are still required
+before the gate can be claimed.
+
+Push failures are fail-closed. A timeout, a non-2xx answer or an unreadable response moves the
+batch to `failed` and it cannot be pushed again until the owner reconciles it against the Tally
+day book. Reconciling as `nothing_received` returns it to `confirmed` and reuses the same
+`REMOTEID`s; reconciling as `pushed` closes it. An automatic retry after an ambiguous answer is
+never offered, because `REMOTEID` is not yet proven on the pilot's Tally build (D9).
 
 ## What the API exposes
 

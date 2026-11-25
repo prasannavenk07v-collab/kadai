@@ -1,4 +1,4 @@
-import { httpError, requireRole } from '../../lib/auth.js';
+import { httpError, requireAttributableRole, requireRole } from '../../lib/auth.js';
 import { tallyConfig } from './tally.config.js';
 import { monthPeriod, previousMonthPeriod } from './tally.ist.js';
 import * as batches from './tally.service.js';
@@ -13,6 +13,9 @@ import { query } from '../../db/index.js';
 
 const owner = requireRole('owner');
 const ownerOrAccountant = requireRole('owner', 'accountant');
+// Statutory actions: a shared-PIN session holds the owner role claim but is not
+// attributable to a person, so it fails closed here (decision D7).
+const attributableOwner = requireAttributableRole('owner');
 
 const XML_BODY_LIMIT = 10 * 1024 * 1024;
 
@@ -108,11 +111,11 @@ export default async function tallyRoutes(fastify, _options) {
     };
   });
 
-  fastify.post('/batches/:id/confirm', { preHandler: owner }, async (request) => {
+  fastify.post('/batches/:id/confirm', { preHandler: attributableOwner }, async (request) => {
     return { batch: await batches.confirmBatch(request.params.id, request.actor.staffId) };
   });
 
-  fastify.post('/batches/:id/void', { preHandler: owner }, async (request) => {
+  fastify.post('/batches/:id/void', { preHandler: attributableOwner }, async (request) => {
     return {
       batch: await batches.voidBatch(
         request.params.id,
@@ -133,7 +136,7 @@ export default async function tallyRoutes(fastify, _options) {
     return reply.send(result.xml);
   });
 
-  fastify.post('/batches/:id/push', { preHandler: owner }, async (request) => {
+  fastify.post('/batches/:id/push', { preHandler: attributableOwner }, async (request) => {
     const outcome = await push.pushBatch(request.params.id, request.actor.staffId);
     return { push: outcome, batch: await batches.getBatch(request.params.id) };
   });
@@ -150,7 +153,7 @@ export default async function tallyRoutes(fastify, _options) {
     return { events: res.rows };
   });
 
-  fastify.post('/batches/:id/reconcile', { preHandler: owner }, async (request) => {
+  fastify.post('/batches/:id/reconcile', { preHandler: attributableOwner }, async (request) => {
     const { outcome, note } = request.body || {};
     return {
       reconciliation: await push.recordReconciliation(

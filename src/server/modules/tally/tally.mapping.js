@@ -4,6 +4,12 @@
 
 export const SUSPENSE_LEDGER = 'Suspense';
 
+/** A name that starts with Suspense is a placeholder, not a mapping. */
+export function isSuspenseLedger(name) {
+  const text = String(name ?? '').trim();
+  return text === '' || text.toLowerCase().startsWith('suspense');
+}
+
 export function slabKey(slab) {
   return Number(slab).toFixed(2);
 }
@@ -86,7 +92,7 @@ export function resolveVoucher({ lines, invoice, defaults, party, shopStateCode 
 
   const salesBreakdown = groups.map((group) => {
     const ledgerName = defaults.sales?.[group.slab];
-    if (!ledgerName || ledgerName === SUSPENSE_LEDGER) {
+    if (isSuspenseLedger(ledgerName)) {
       issues.push(issue('suspense', 'MISSING_SALES_LEDGER',
         `No sales ledger mapped for the ${group.slab}% slab.`));
     }
@@ -99,7 +105,7 @@ export function resolveVoucher({ lines, invoice, defaults, party, shopStateCode 
 
   const taxLedger = (role) => {
     const name = defaults[role];
-    if (!name || name === SUSPENSE_LEDGER) {
+    if (isSuspenseLedger(name)) {
       issues.push(issue('suspense', 'MISSING_TAX_LEDGER', `No ${role} ledger is mapped.`));
       return SUSPENSE_LEDGER;
     }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { ledgerDefaults, resolveVoucher, taxableBySlab } from './tally.mapping.js';
+import { isSuspenseLedger, ledgerDefaults, resolveVoucher, taxableBySlab } from './tally.mapping.js';
 
 const shopStateCode = '33';
 
@@ -162,4 +162,21 @@ test('mapping: ledger defaults ignore inactive rows and keep slab keys canonical
   assert.equal(mapped.sales['18.00'], 'Sales 18');
   assert.equal(mapped.sales['5.00'], undefined, 'inactive defaults must not be used');
   assert.equal(mapped.output_cgst, 'Output CGST');
+});
+
+test('mapping: any Suspense placeholder reads as unmapped', () => {
+  assert.equal(isSuspenseLedger('Suspense'), true);
+  assert.equal(isSuspenseLedger('suspense 18%'), true);
+  assert.equal(isSuspenseLedger('   '), true);
+  assert.equal(isSuspenseLedger(null), true);
+  assert.equal(isSuspenseLedger('Sales @ 18%'), false);
+
+  const resolved = resolveVoucher({
+    lines,
+    invoice: invoice(),
+    defaults: defaults({ sales: { '18.00': 'Suspense 18%' } }),
+    party,
+    shopStateCode,
+  });
+  assert.equal(resolved.status, 'suspense', 'a renamed Suspense row is still Suspense');
 });

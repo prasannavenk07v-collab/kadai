@@ -178,6 +178,34 @@ async function recordEvent({ batchId, event, attemptNo, actorId, requestSha, htt
   ]);
 }
 
+// A batch may only be pushed from `confirmed`. Any attempt that may have
+// reached Tally moves it to `failed`, and `failed` cannot be pushed: REMOTEID
+// is not a verified duplicate guard on the pilot's Tally build (decision D9),
+// so an automatic retry would gamble with the book of record. The owner must
+// reconcile first. This is the control the plan requires in §4.4 and §7.3;
+// expressing it as a 504 message would be a control that fails open.
+export const PUSHABLE_STATUSES = ['confirmed'];
+
+export function assertPushableStatus(status) {
+  if (PUSHABLE_STATUSES.includes(status)) return;
+
+  if (status === 'failed') {
+    throw httpError(409, 'PUSH_NEEDS_RECONCILIATION',
+      'The previous attempt may have reached Tally. Reconcile it against the day book '
+      + 'before pushing again — do not gamble with duplicate vouchers.');
+  }
+  if (['pushed', 'pushed_with_conflicts'].includes(status)) {
+    throw httpError(409, 'ALREADY_PUSHED',
+      'This batch has already been pushed. A second batch of the same invoices is not allowed.');
+  }
+  throw httpError(409, 'INVALID_STATE',
+    `Batch is ${status}; only a confirmed batch can be pushed.`);
+}
+
+async function markFailed(batchId) {
+  await query("UPDATE tally_batches SET status = 'failed' WHERE id = $1", [batchId]);
+}
+
 /**
  * Push a confirmed batch. Every attempt is journalled before the network call,
  * so a crash mid-request leaves evidence rather than a silent duplicate.
@@ -186,14 +214,7 @@ export async function pushBatch(batchId, actorId) {
   const config = tallyConfig();
   const batch = await loadBatch(batchId);
 
-  if (['pushed', 'pushed_with_conflicts'].includes(batch.status)) {
-    throw httpError(409, 'ALREADY_PUSHED',
-      'This batch has already been pushed. A second batch of the same invoices is not allowed.');
-  }
-  if (batch.status !== 'confirmed' && batch.status !== 'failed') {
-    throw httpError(409, 'INVALID_STATE',
-      `Batch is ${batch.status}; only a confirmed batch can be pushed.`);
-  }
+  assertPushableStatus(batch.status);
 
   const lines = await getBatchLines(batchId);
   if (lines.length === 0) {
@@ -248,18 +269,40 @@ export async function pushBatch(batchId, actorId) {
       error: ambiguous ? 'AMBIGUOUS_TIMEOUT' : `CONNECTION_FAILED: ${err.code || err.message}`,
     });
     if (ambiguous) {
+      // The request may have been applied. Record the doubt and make the batch
+      // unpushable until a human has compared it with Tally's day book.
+      await markFailed(batchId);
       throw httpError(504, 'TALLY_AMBIGUOUS',
-        'Tally did not answer in time. The request may have arrived: reconcile by REMOTEID '
-        + 'before retrying, or download the XML and check the day book.');
+        'Tally did not answer in time. The request may have arrived, so this batch now '
+        + 'needs reconciliation before it can be pushed again.');
     }
     throw httpError(502, 'TALLY_UNREACHABLE',
       `Could not reach Tally (${err.code || err.message}). The XML is still downloadable.`);
   }
 
-  const body = await readLimited(response, config.maxResponseBytes);
+  let body;
+  try {
+    body = await readLimited(response, config.maxResponseBytes);
+  } catch (err) {
+    // A 200 with an unreadable body is ambiguous: Tally may have imported.
+    await markFailed(batchId);
+    await recordEvent({
+      batchId,
+      event: 'failed',
+      attemptNo,
+      actorId,
+      requestSha,
+      httpStatus: response.status,
+      error: `UNREADABLE_RESPONSE: ${err.code || err.message}`,
+    });
+    throw err;
+  }
+
   const parsed = response.ok ? parseTallyResponse(body) : null;
 
   if (!response.ok) {
+    // The request reached Tally, so partial import is possible. Reconcile.
+    await markFailed(batchId);
     await recordEvent({
       batchId,
       event: 'failed',
@@ -271,7 +314,7 @@ export async function pushBatch(batchId, actorId) {
       error: `HTTP ${response.status}`,
     });
     throw httpError(502, 'TALLY_REJECTED',
-      `Tally answered HTTP ${response.status}. Nothing was marked as pushed.`);
+      `Tally answered HTTP ${response.status}. The batch needs reconciliation before it can be pushed again.`);
   }
 
   const failed = (parsed.errors ?? 0) > 0 || (parsed.exceptions ?? 0) > 0;
@@ -322,18 +365,30 @@ export async function pushBatch(batchId, actorId) {
 /**
  * Close an ambiguous push by hand: the accountant checked the Tally day book.
  */
+export const RECONCILE_OUTCOMES = {
+  pushed: 'pushed',
+  pushed_with_conflicts: 'pushed_with_conflicts',
+  // The accountant checked Tally and found nothing: only then may the batch go
+  // back to `confirmed` and reuse the same REMOTEIDs.
+  nothing_received: 'confirmed',
+};
+
 export async function recordReconciliation(batchId, actorId, { outcome, note } = {}) {
-  if (!['pushed', 'pushed_with_conflicts'].includes(outcome)) {
-    throw httpError(400, 'INVALID_OUTCOME', 'outcome must be "pushed" or "pushed_with_conflicts".');
+  if (!Object.hasOwn(RECONCILE_OUTCOMES, outcome)) {
+    throw httpError(400, 'INVALID_OUTCOME',
+      `outcome must be one of ${Object.keys(RECONCILE_OUTCOMES).join(', ')}.`);
   }
   if (!note || !String(note).trim()) {
     throw httpError(400, 'REASON_REQUIRED', 'Reconciliation requires a note describing what Tally shows.');
   }
 
   const batch = await loadBatch(batchId);
-  if (!['confirmed', 'failed', 'pushed_with_conflicts'].includes(batch.status)) {
-    throw httpError(409, 'INVALID_STATE', `Batch is ${batch.status}; it cannot be reconciled.`);
+  if (!['failed', 'pushed_with_conflicts'].includes(batch.status)) {
+    throw httpError(409, 'INVALID_STATE',
+      `Batch is ${batch.status}; only a failed or conflicted push can be reconciled.`);
   }
+
+  const nextStatus = RECONCILE_OUTCOMES[outcome];
 
   const previous = await query(
     'SELECT coalesce(max(attempt_no), 0)::int AS attempt FROM tally_push_events WHERE batch_id = $1',
@@ -347,9 +402,9 @@ export async function recordReconciliation(batchId, actorId, { outcome, note } =
     actorId,
     error: String(note).trim(),
   });
-  await query('UPDATE tally_batches SET status = $2 WHERE id = $1', [batchId, outcome]);
+  await query('UPDATE tally_batches SET status = $2 WHERE id = $1', [batchId, nextStatus]);
 
-  return { batch_id: batchId, status: outcome };
+  return { batch_id: batchId, status: nextStatus, outcome };
 }
 
 export { sha256Hex };
