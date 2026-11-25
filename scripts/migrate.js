@@ -1,5 +1,5 @@
-import { readFileSync, existsSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
+import { readFileSync, existsSync, readdirSync } from 'node:fs';
+import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import pg from 'pg';
 
@@ -25,6 +25,22 @@ if (existsSync(envPath)) {
 
 const connectionString = process.env.DATABASE_URL || 'postgres://kadai:kadai@localhost:5432/kadai';
 
+const dbDir = resolve(rootDir, 'src/server/db');
+const migrationsDir = join(dbDir, 'migrations');
+
+// schema.sql is the initial shape; every file in migrations/ is replayed after
+// it in filename order. All statements are additive and idempotent, so the
+// whole set can run against a restored backup or an already-migrated database.
+function migrationFiles() {
+  const files = [{ label: 'src/server/db/schema.sql', path: join(dbDir, 'schema.sql') }];
+  if (existsSync(migrationsDir)) {
+    for (const name of readdirSync(migrationsDir).filter((f) => f.endsWith('.sql')).sort()) {
+      files.push({ label: `src/server/db/migrations/${name}`, path: join(migrationsDir, name) });
+    }
+  }
+  return files;
+}
+
 async function migrate() {
   console.log(`🔌 Connecting to database: ${connectionString.replace(/:[^:@]+@/, ':***@')}`);
   const client = new pg.Client({
@@ -36,12 +52,11 @@ async function migrate() {
     await client.connect();
     console.log('✅ Connected.');
 
-    const schemaSql = readFileSync(resolve(rootDir, 'src/server/db/schema.sql'), 'utf8');
-    console.log('📜 Executing src/server/db/schema.sql...');
-
-    // Execute schema in transaction
     await client.query('BEGIN');
-    await client.query(schemaSql);
+    for (const file of migrationFiles()) {
+      console.log(`📜 Executing ${file.label}...`);
+      await client.query(readFileSync(file.path, 'utf8'));
+    }
     await client.query('COMMIT');
 
     console.log('🎉 Migration successful! All tables, enums and constraints created.');

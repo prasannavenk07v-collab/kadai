@@ -8,6 +8,8 @@ import staffRoutes from './modules/staff/staff.routes.js';
 import catalogueRoutes from './modules/catalogue/catalogue.routes.js';
 import customersRoutes from './modules/customers/customers.routes.js';
 import bookingsRoutes from './modules/bookings/bookings.routes.js';
+import authRoutes from './modules/auth/auth.routes.js';
+import tallyRoutes from './modules/tally/tally.routes.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -44,6 +46,22 @@ await fastify.register(cors, {
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'],
 });
 
+// Tally uploads arrive as raw bytes: a Tally XML export or an .xlsx workbook.
+// Multipart is deliberately not used, so there is no parser surface to exploit.
+const RAW_UPLOAD_LIMIT = 10 * 1024 * 1024;
+for (const contentType of [
+  'application/xml',
+  'text/xml',
+  'application/octet-stream',
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]) {
+  fastify.addContentTypeParser(
+    contentType,
+    { parseAs: 'buffer', bodyLimit: RAW_UPLOAD_LIMIT },
+    (_request, body, done) => done(null, body)
+  );
+}
+
 // Health check
 fastify.get('/api/health', async () => {
   return { status: 'ok', time: new Date().toISOString(), app: 'kadai' };
@@ -68,6 +86,8 @@ await fastify.register(staffRoutes, { prefix: '/api/staff' });
 await fastify.register(catalogueRoutes, { prefix: '/api/catalogue' });
 await fastify.register(customersRoutes, { prefix: '/api/customers' });
 await fastify.register(bookingsRoutes, { prefix: '/api/bookings' });
+await fastify.register(authRoutes, { prefix: '/api/auth' });
+await fastify.register(tallyRoutes, { prefix: '/api/tally' });
 
 // Global Error Handler
 fastify.setErrorHandler((error, request, reply) => {
@@ -76,6 +96,7 @@ fastify.setErrorHandler((error, request, reply) => {
   reply.status(statusCode).send({
     error: error.message || 'Internal Server Error',
     code: error.code || 'INTERNAL_ERROR',
+    ...(error.details ? { details: error.details } : {}),
   });
 });
 
