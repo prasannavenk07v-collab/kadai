@@ -672,3 +672,29 @@ be reused if it lands on `main`; otherwise use a disposable Postgres database in
 - [PRD §4.4 · Tally import](prd.md)
 - [Project charter · W5 and M3 gate](project-charter.md)
 - [Release runbook](runbooks/release.md)
+
+## 16 · Implementation status
+
+The backend of this plan landed ahead of the UI. Status against §11:
+
+| Work | Status | Where |
+| --- | --- | --- |
+| W5-1 Version spike, decisions | **Open** — blocked on the shop and CA (D1–D10) | `docs/tally-integration.md` version table |
+| W5-2 Schema, migrations, append-only grants | Done | `src/server/db/migrations/001-m3-books.sql` |
+| W5-3 Canonical voucher, XML renderer | Done | `src/server/modules/tally/tally.xml.js`, `tally.mapping.js` |
+| W5-4 Batch generation, IST periods, validation | Done | `tally.service.js`, `tally.ist.js` |
+| W5-5 Mapping, Suspense block, confirmation, hash | Done | `tally.service.js`, `tally.ledger.service.js` |
+| W5-6 Push transport, idempotency, reconciliation | Done | `tally.push.service.js` |
+| W5-7 Day-book XML/XLSX parsing, preview, log | Done | `tally.import.js`, `tally.xlsx.js`, `tally.import.service.js` |
+| W5-8 Tally UI, Tamil keys | **Partial** — locale keys done, screens not built | `locales/{en,ta}.json` |
+| W5-9 Unit, contract, security tests | Done for the backend | `tally.*.test.js` |
+| W5-10 Acceptance run, runbook, CA sign-off | **Open** — needs a real period and a test company | — |
+
+Two deliberate deviations from the text above, both additive:
+
+- `tally_batch_lines.sales_breakdown` (jsonb) stores the per-slab taxable split, so an
+  invoice with a 5% and an 18% line still produces one balanced voucher with two sales
+  ledger entries. `sales_ledger_name` is kept as the first group's ledger for compatibility.
+- Invoice lines are summed per slab and must equal the frozen invoice taxable value; a
+  one-paise disagreement sets the line to `conflict` and confirmation is blocked. Nothing
+  is rounded into agreement.

@@ -56,6 +56,23 @@ async function seed() {
     const raviId = staffRes.rows[1].id;
     const meeraId = staffRes.rows[2].id;
 
+    // Tally ledger defaults are seeded as Suspense on purpose: a missing
+    // mapping must block confirmation, not silently post a guess. Replace
+    // these with the CA-approved ledger names (D4) before the pilot batch.
+    console.log('🔗 Inserting Tally ledger defaults (Suspense placeholders)...');
+    await client.query(`
+      INSERT INTO tally_ledger_defaults (role, gst_slab, tally_ledger_name) VALUES
+      ('sales', 0, 'Suspense'),
+      ('sales', 5, 'Suspense'),
+      ('sales', 12, 'Suspense'),
+      ('sales', 18, 'Suspense'),
+      ('sales', 28, 'Suspense'),
+      ('output_cgst', null, 'Suspense'),
+      ('output_sgst', null, 'Suspense'),
+      ('output_igst', null, 'Suspense')
+      ON CONFLICT DO NOTHING;
+    `);
+
     console.log('📦 Inserting catalogue items (Products & Services)...');
     const catRes = await client.query(`
       INSERT INTO catalogue_items (kind, name, description, hsn, sac, gst_slab, price_paise, duration_min, stock_qty, reorder_point, bookable_online, active) VALUES
