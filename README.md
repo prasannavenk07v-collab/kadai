@@ -47,6 +47,7 @@ npm run dev            # counter UI at :5173, API at :3000
 - [Project Charter & Plan](docs/project-charter.md) — who, when, budget, risk
 - [Architecture](docs/architecture.md)
 - [GST compliance](docs/gst-compliance.md) · [Tally integration](docs/tally-integration.md)
+- [M3 Books plan](docs/m3-books-plan.md) — Tally push and day-book import
 - [Localisation](docs/localisation.md) · [Tamil glossary](docs/glossary-tamil.md)
 - [Decision log](docs/decisions/README.md)
 

@@ -2,6 +2,8 @@
 
 Tally remains the book of record. Kadai hands over; it does not keep its own ledger.
 
+Delivery detail: [M3 Books plan](m3-books-plan.md).
+
 ## Outbound — vouchers to Tally
 
 1. **Generate** vouchers for a period from invoices and completed jobs.
